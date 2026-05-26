@@ -134,30 +134,52 @@ class Board:
     # ------------------------------------------------------------------
 
     def _resolve_completions(self, row: int, col: int) -> list[tuple[int, int]]:
-        """Controlla riga e colonna dell'ultima mossa; se complete, le azzera e le dora."""
-        completed: list[tuple[int, int]] = []
+        """Controlla riga e colonna dell'ultima mossa; se complete, le azzera e le dora.
 
-        if all(self._grid[row][c] is not None for c in range(GRID_SIZE)):
-            completed.append((0, row))
-        if all(self._grid[r][col] is not None for r in range(GRID_SIZE)):
-            completed.append((1, col))
-
-        if not completed:
-            return completed
-
-        # Raccoglie tutte le celle da rimuovere (set per deduplicare l'incrocio)
-        cells: set[tuple[int, int]] = set()
-        for axis, idx in completed:
+        Usa una work-queue BFS per rilevare completamenti indiretti: quando una colonna
+        viene completata e le sue rune rimosse, una riga che aveva già 8 rune + quella
+        cella ora oro può diventare anch'essa completa senza che vi sia stata piazzata
+        una runa nuova. La condizione di completamento include sia rune (grid != None)
+        che celle già oro (gold == True).
+        """
+        def is_line_complete(axis: int, idx: int) -> bool:
             if axis == 0:
-                cells.update((idx, c) for c in range(GRID_SIZE))
-            else:
-                cells.update((r, idx) for r in range(GRID_SIZE))
+                return all(self._grid[idx][c] is not None or self._gold[idx][c]
+                           for c in range(GRID_SIZE))
+            return all(self._grid[r][idx] is not None or self._gold[r][idx]
+                       for r in range(GRID_SIZE))
 
-        for r, c in cells:
-            if self._grid[r][c] is not None:
-                self._grid[r][c] = None
-                self._rune_count -= 1
-            self._gold[r][c] = True
+        completed: list[tuple[int, int]] = []
+        done: set[tuple[int, int]] = set()
+        queue: list[tuple[int, int]] = []
+
+        if is_line_complete(0, row):
+            queue.append((0, row))
+        if is_line_complete(1, col):
+            queue.append((1, col))
+
+        while queue:
+            item = queue.pop(0)
+            if item in done:
+                continue
+            done.add(item)
+            completed.append(item)
+            axis, idx = item
+
+            line_cells = (
+                [(idx, c) for c in range(GRID_SIZE)] if axis == 0
+                else [(r, idx) for r in range(GRID_SIZE)]
+            )
+            perp_axis = 1 - axis
+            for r, c in line_cells:
+                if self._grid[r][c] is not None:
+                    self._grid[r][c] = None
+                    self._rune_count -= 1
+                self._gold[r][c] = True
+                perp_idx = c if axis == 0 else r
+                candidate = (perp_axis, perp_idx)
+                if candidate not in done and is_line_complete(perp_axis, perp_idx):
+                    queue.append(candidate)
 
         return completed
 
