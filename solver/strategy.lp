@@ -93,9 +93,10 @@ has_free_vert(R,C)  :- valid_placement(R,C), R1 = R+1, row(R1), empty(R1,C).
 %      salvo completamenti di riga/colonna (gestiti da P4).
 :~ place(R,C), not board_empty, not has_main_cluster_neighbor(R,C). [25@3, R, C]
 
-% P3b — Preferire posizioni in righe/colonne già più riempite.
-%      Gap = (8-NR) + (8-NC); minimizzare Gap = massimizzare NR+NC.
-:~ place(R,C), row_fill(R,NR), col_fill(C,NC), Gap = 16 - NR - NC. [Gap@3, R, C]
+% P3b — Preferire posizioni in righe/colonne già più riempite, penalizzando lo sbilanciamento.
+%      Costo = Gap + |NR-NC| = 16 - 2*min(NR,NC): massimizza il minimo tra fill di riga e colonna,
+%      evitando il feedback loop che concentra i piazzamenti su una sola dimensione.
+:~ place(R,C), row_fill(R,NR), col_fill(C,NC), Gap = 16 - NR - NC, Imb = |NR - NC|. [Gap + Imb@3, R, C]
 
 % P2a — Penalizzare piazzamenti che lasciano meno di 3 celle libere adiacenti.
 %      Evita di incastrarsi in vicoli ciechi che forzano scarti consecutivi.
