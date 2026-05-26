@@ -18,28 +18,104 @@
 % Per skull: rimuovi una runa oppure scarta
 1 { use_skull(R,C) : valid_removal(R,C) ; discard } 1 :- current_type(skull).
 
-% --- Vincolo duro: non scartare se esistono piazzamenti validi ---
-% Scartare aumenta la forge di 1; piazzare la diminuisce di 1.
-% Non c'è mai motivo di scartare quando si può piazzare.
+% --- Vincoli duri: non scartare quando esiste un'azione valida ---
+% Scartare aumenta la forge di 1; qualsiasi azione la diminuisce di 1.
+% Non c'è mai motivo di scartare quando si può piazzare o usare uno skull.
 :- discard, valid_placement(_,_), not current_type(skull).
+:- discard, valid_removal(_,_), current_type(skull).
 
-% --- Vincoli deboli (weak constraints) ---
+% ============================================================
+% Calcolo del cluster principale (connettività della board)
+%
+% Le rune sulla board formano idealmente un unico gruppo connesso.
+% Dopo azioni skull la board può frammentarsi: i vincoli P3a
+% garantiscono che si espanda sempre il cluster principale.
+% ============================================================
+
+% Radice deterministica: cella occupata con indice R*9+C minore
+main_anchor(R,C) :-
+    occupied(R,C),
+    #min{ R1*9+C1 : occupied(R1,C1) } = R*9+C.
+
+% BFS: celle raggiungibili dall'ancora via adiacenza tra celle occupate
+in_main_cluster(R,C) :- main_anchor(R,C).
+in_main_cluster(R,C) :- in_main_cluster(R1,C1), adj(R1,C1,R,C), occupied(R,C).
+
+% Il piazzamento proposto tocca almeno un vicino del cluster principale
+has_main_cluster_neighbor(R,C) :-
+    valid_placement(R,C),
+    adj(R,C,R1,C1),
+    in_main_cluster(R1,C1).
+
+% ============================================================
+% Celle libere adiacenti dopo il piazzamento (opzioni future)
+%
+% Misura quante celle vuote resterebbero raggiungibili dalla
+% nuova posizione, proxy per le opzioni disponibili al turno dopo.
+% ============================================================
+
+free_neighbors_after(R,C,N) :-
+    valid_placement(R,C),
+    N = #count{ R1,C1 : adj(R,C,R1,C1), empty(R1,C1) }.
+
+% ============================================================
+% Espansione bidirezionale (asse orizzontale e verticale)
+%
+% Il solver deve espandersi in entrambe le dimensioni per costruire
+% cluster compatti. Piazzare su una cella senza libertà su un asse
+% costringe il cluster a crescere solo in linea, riducendo le opzioni.
+% ============================================================
+
+% Distanza Manhattan dal centro della griglia (riga 4, colonna 4)
+% — usata per la preferenza centrale alla prima mossa
+center_dist(R,C,D) :- valid_placement(R,C), D = |R-4| + |C-4|.
+
+% Esiste almeno una cella libera a sinistra o a destra
+has_free_horiz(R,C) :- valid_placement(R,C), C1 = C-1, col(C1), empty(R,C1).
+has_free_horiz(R,C) :- valid_placement(R,C), C1 = C+1, col(C1), empty(R,C1).
+
+% Esiste almeno una cella libera sopra o sotto
+has_free_vert(R,C)  :- valid_placement(R,C), R1 = R-1, row(R1), empty(R1,C).
+has_free_vert(R,C)  :- valid_placement(R,C), R1 = R+1, row(R1), empty(R1,C).
+
+% ============================================================
+% Vincoli deboli (weak constraints)
 % Sintassi: :~ condizione. [peso@priorità, variabili...]
 % Il solver minimizza la somma pesata; priorità più alta = criterio più importante.
+% ============================================================
 
 % P4 — MASSIMA PRIORITÀ: preferire mosse che completano righe/colonne.
 %      Il completamento svuota completamente la forge e fa oro 9 celle.
 :~ place(R,C), not would_complete_row(R,C), not would_complete_col(R,C). [1@4, R, C]
 
-% P3 — Preferire posizioni in righe/colonne già più riempite.
-%      Massimizzare NR+NC avvicina al completamento in entrambe le direzioni.
-%      Gap = (8-NR) + (8-NC) = 16 - NR - NC; minimizzare Gap = massimizzare NR+NC.
+% P3a — Espandere il cluster principale, non un cluster secondario.
+%      Peso 25 > Gap massimo (16): la connettività batte sempre il fill,
+%      salvo completamenti di riga/colonna (gestiti da P4).
+:~ place(R,C), not board_empty, not has_main_cluster_neighbor(R,C). [25@3, R, C]
+
+% P3b — Preferire posizioni in righe/colonne già più riempite.
+%      Gap = (8-NR) + (8-NC); minimizzare Gap = massimizzare NR+NC.
 :~ place(R,C), row_fill(R,NR), col_fill(C,NC), Gap = 16 - NR - NC. [Gap@3, R, C]
 
-% P2 — Evitare il discard quando la forge è pericolosa (livello 2 o 3).
+% P2a — Penalizzare piazzamenti che lasciano meno di 3 celle libere adiacenti.
+%      Evita di incastrarsi in vicoli ciechi che forzano scarti consecutivi.
+%      Penalità crescente: N=2 → 1, N=1 → 2, N=0 → 3.
+:~ place(R,C), free_neighbors_after(R,C,N), N < 3. [3-N@2, R, C]
+
+% P2b — Evitare il discard quando la forge è pericolosa (livello 2 o 3).
 :~ discard, forge_level(N), N >= 2. [N@2]
 
-% P1 — Evitare il discard anche quando la forge è bassa (preferire sempre piazzare).
+% P2c — Penalizzare piazzamenti che bloccano l'espansione su almeno un asse.
+%      Peso 3 per asse mancante: max +6 se entrambi gli assi sono bloccati.
+:~ place(R,C), not has_free_horiz(R,C). [3@2, R, C]
+:~ place(R,C), not has_free_vert(R,C).  [3@2, R, C]
+
+% P1a — Prima mossa (board vuota): preferire il centro per massimizzare
+%       le direzioni di espansione. Attivo SOLO al primo turno; si disattiva
+%       automaticamente non appena una runa è piazzata.
+:~ place(R,C), board_empty, center_dist(R,C,D). [D@1, R, C]
+
+% P1b — Evitare il discard anche quando la forge è bassa (preferire sempre piazzare).
 :~ discard. [1@1]
 
 % P0 — Tie-breaking deterministico: a parità di tutto, scegliere la posizione

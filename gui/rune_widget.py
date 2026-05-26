@@ -4,6 +4,7 @@ from __future__ import annotations
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt
 from game.rune import Rune, RuneType
+from gui.rune_maps import SYMBOL_MAP, COLOR_MAP
 
 
 class RuneWidget(QWidget):
@@ -40,19 +41,6 @@ class RuneWidget(QWidget):
 
     def set_rune(self, rune: Rune) -> None:
         """Aggiorna l'anteprima mostrando i dettagli e i glifi reali della runa."""
-        symbol_map = {
-            "Ariete": "♈", "Toro": "♉", "Gemelli": "♊", "Cancro": "♋",
-            "Leone": "♌", "Vergine": "♍", "Bilancia": "♎", "Scorpione": "♏",
-            "Sagittario": "♐", "Capricorno": "♑", "Acquario": "♒", "Pesci": "♓"
-        }
-
-        color_map = {
-            "Rosso": "#FF4B5C",
-            "Blu": "#00A8FF",
-            "Verde": "#00E676",
-            "Giallo": "#FFD32A"
-        }
-
         if rune.rune_type == RuneType.WILDCARD:
             self._preview_box.setText("★")
             self._preview_box.setStyleSheet(
@@ -73,8 +61,8 @@ class RuneWidget(QWidget):
             # Runa normale: estrae il nome in italiano e mappa il glifo corretto
             sym_text = rune.symbol.value if rune.symbol else "?"
             col_text = rune.color.value if rune.color else "?"
-            bg_color = color_map.get(col_text, "#34495E")
-            glyph = symbol_map.get(sym_text, "•")
+            bg_color = COLOR_MAP.get(col_text, "#34495E")
+            glyph = SYMBOL_MAP.get(sym_text, "•")
 
             self._preview_box.setText(glyph)
             self._preview_box.setStyleSheet(

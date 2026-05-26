@@ -29,7 +29,7 @@ class MainWindow(QMainWindow):
         # Timer loop automatico
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._game_tick)
-        self._tick_interval_ms = 450  # Velocità di gioco fluida
+        self._tick_interval_ms = 800  # Pausa visibile per seguire il ragionamento del solver
 
         # Widget grafici
         from gui.board_widget import BoardWidget
@@ -196,21 +196,6 @@ class MainWindow(QMainWindow):
         self._timer.start(self._tick_interval_ms)
 
     def _game_tick(self) -> None:
-        if self._board.is_board_complete():
-            self._timer.stop()
-            self._lbl_status.setStyleSheet("color: #2ECC71; font-weight: bold; font-size: 13px;")
-            self._lbl_status.setText("🏆 VITTORIA! Board completata con successo!")
-            self._finalize_game()
-            return
-
-        if self._forge.is_game_over:
-            self._timer.stop()
-            self._lbl_status.setStyleSheet("color: #E74C3C; font-weight: bold; font-size: 13px;")
-            self._lbl_status.setText("💥 GAME OVER! La forge è esplosa.")
-            self._forge_widget.update_state(self._forge.level, True)
-            self._finalize_game()
-            return
-
         self._turn_count += 1
 
         assert self._generator is not None
@@ -242,10 +227,19 @@ class MainWindow(QMainWindow):
             self._lbl_status.setText("Nessun incastro. Runa scartata.")
 
         self._board_widget.update_styles_from_logic(self._board)
-        if not self._forge.is_game_over:
-            self._forge_widget.update_state(self._forge.level, False)
-
+        self._forge_widget.update_state(self._forge.level, self._forge.is_game_over)
         self._update_statistics_labels()
+
+        if self._board.is_board_complete():
+            self._timer.stop()
+            self._lbl_status.setStyleSheet("color: #2ECC71; font-weight: bold; font-size: 13px;")
+            self._lbl_status.setText("🏆 VITTORIA! Board completata con successo!")
+            self._finalize_game()
+        elif self._forge.is_game_over:
+            self._timer.stop()
+            self._lbl_status.setStyleSheet("color: #E74C3C; font-weight: bold; font-size: 13px;")
+            self._lbl_status.setText("💥 GAME OVER! La forge è esplosa.")
+            self._finalize_game()
 
     def _update_statistics_labels(self) -> None:
         self._lbl_turns.setText(f"Turno Corrente: {self._turn_count}")

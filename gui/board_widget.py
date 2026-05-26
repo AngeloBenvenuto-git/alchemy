@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import QGridLayout, QPushButton, QWidget
 from PyQt6.QtCore import Qt
 from game.board import Board, GRID_SIZE
 from game.rune import RuneType
+from gui.rune_maps import SYMBOL_MAP, COLOR_MAP
 
 
 class BoardWidget(QWidget):
@@ -34,20 +35,6 @@ class BoardWidget(QWidget):
 
     def update_styles_from_logic(self, board: Board) -> None:
         """Aggiorna la grafica della scacchiera applicando uno stile moderno."""
-        # Mappa dei simboli minimali per non affollare la cella con testo tagliato
-        symbol_map = {
-            "Ariete": "♈", "Toro": "♉", "Gemelli": "♊", "Cancro": "♋",
-            "Leone": "♌", "Vergine": "♍", "Bilancia": "♎", "Scorpione": "♏",
-            "Sagittario": "♐", "Capricorno": "♑", "Acquario": "♒", "Pesci": "♓"
-        }
-
-        color_map = {
-            "Rosso": "#FF4B5C",   # Sfumatura di rosso più moderna
-            "Blu": "#00A8FF",     # Neon blue
-            "Verde": "#00E676",   # Smeraldo acceso
-            "Giallo": "#FFD32A"   # Giallo caldo vivido
-        }
-
         for r in range(GRID_SIZE):
             for c in range(GRID_SIZE):
                 btn = self._buttons[r][c]
@@ -62,7 +49,7 @@ class BoardWidget(QWidget):
                         btn.setText("☠")
                     else:
                         sym_val = rune.symbol.value if rune.symbol else ""
-                        btn.setText(symbol_map.get(sym_val, "•"))
+                        btn.setText(SYMBOL_MAP.get(sym_val, "•"))
                 else:
                     btn.setText("")
 
@@ -91,7 +78,7 @@ class BoardWidget(QWidget):
                         """
                     else:
                         col_val = rune.color.value if rune.color else ""
-                        bg_color = color_map.get(col_val, "#7F8C8D")
+                        bg_color = COLOR_MAP.get(col_val, "#7F8C8D")
                         style += f"""
                             background-color: {bg_color};
                             border: 1px solid rgba(0, 0, 0, 0.2);
