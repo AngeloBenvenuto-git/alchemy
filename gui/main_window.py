@@ -5,11 +5,31 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QComboBox, QGroupBox
 )
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal
 from game.board import Board
 from game.forge import Forge
 from game.generator import RuneGenerator
+from game.rune import Rune
 from solver.asp_solver import get_best_move
+
+
+class MoveWorker(QThread):
+    """Thread background che calcola la mossa ottimale senza bloccare la GUI.
+
+    Emette move_ready(dict) con la mossa scelta al termine del calcolo.
+    La GUI rimane responsiva durante l'elaborazione del Monte Carlo rollout.
+    """
+    move_ready: pyqtSignal = pyqtSignal(dict)
+
+    def __init__(self, board: Board, rune: Rune, forge_level: int) -> None:
+        super().__init__()
+        self._board = board
+        self._rune = rune
+        self._forge_level = forge_level
+
+    def run(self) -> None:
+        move = get_best_move(self._board, self._rune, self._forge_level)
+        self.move_ready.emit(move)
 
 
 class MainWindow(QMainWindow):
@@ -18,7 +38,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Alchemy — AI Solver (ASP)")
-        self.setMinimumSize(820, 600)  # Spazio leggermente allargato per il respiro visivo
+        self.setMinimumSize(820, 600)
 
         # Logica di gioco
         self._board = Board()
@@ -26,10 +46,19 @@ class MainWindow(QMainWindow):
         self._generator: RuneGenerator | None = None
         self._turn_count = 0
 
-        # Timer loop automatico
+        # Runa del turno corrente — condivisa tra _game_tick e _on_move_ready
+        self._current_rune: Rune | None = None
+
+        # Worker per il calcolo asincrono della mossa
+        self._worker: MoveWorker | None = None
+
+        # Timer single-shot: pausa visibile tra un turno e il successivo.
+        # Non si riarma automaticamente; viene riavviato da _on_move_ready
+        # dopo che la mossa è stata applicata e la UI aggiornata.
         self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._game_tick)
-        self._tick_interval_ms = 800  # Pausa visibile per seguire il ragionamento del solver
+        self._tick_interval_ms = 800
 
         # Widget grafici
         from gui.board_widget import BoardWidget
@@ -59,14 +88,12 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout()
         left_layout.setSpacing(15)
 
-        # Contenitore per la forge isolata in alto
         forge_container = QWidget()
         forge_layout = QHBoxLayout(forge_container)
         forge_layout.setContentsMargins(5, 0, 0, 0)
         forge_layout.addWidget(self._forge_widget)
         left_layout.addWidget(forge_container)
 
-        # Griglia centrale
         left_layout.addWidget(self._board_widget, alignment=Qt.AlignmentFlag.AlignCenter)
         main_layout.addLayout(left_layout, stretch=3)
 
@@ -95,10 +122,10 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(self._btn_start)
         right_panel.addWidget(ctrl_group)
 
-        # Card 2: Visualizzatore Runa (Gestito dal suo widget interno)
+        # Card 2: Visualizzatore Runa
         right_panel.addWidget(self._rune_widget)
 
-        # Card 3: Performance e Statistiche dell'IA
+        # Card 3: Statistiche
         stats_group = QGroupBox("STATISTICHE AGENTE")
         stats_layout = QVBoxLayout(stats_group)
         stats_layout.setSpacing(8)
@@ -110,7 +137,7 @@ class MainWindow(QMainWindow):
         stats_layout.addWidget(self._lbl_gold)
         right_panel.addWidget(stats_group)
 
-        # Feed delle notifiche in basso (Log delle mosse)
+        # Log mosse
         self._lbl_status.setWordWrap(True)
         self._lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         right_panel.addWidget(self._lbl_status)
@@ -177,9 +204,16 @@ class MainWindow(QMainWindow):
                 color: #7F8C8D;
             }
         """)
-        self._lbl_status.setStyleSheet("color: #E67E22; font-weight: bold; font-size: 12px; padding: 5px;")
+        self._lbl_status.setStyleSheet(
+            "color: #E67E22; font-weight: bold; font-size: 12px; padding: 5px;"
+        )
 
     def _start_game(self) -> None:
+        # Disconnette un eventuale worker rimasto da una partita precedente
+        if self._worker is not None:
+            self._worker.move_ready.disconnect()
+            self._worker = None
+
         self._btn_start.setEnabled(False)
         self._combo_diff.setEnabled(False)
 
@@ -187,23 +221,46 @@ class MainWindow(QMainWindow):
         self._forge = Forge()
         self._generator = RuneGenerator(difficulty=self._combo_diff.currentText())
         self._turn_count = 0
+        self._current_rune = None
 
         self._board_widget.update_styles_from_logic(self._board)
         self._forge_widget.update_state(0, False)
         self._rune_widget.clear_preview()
 
+        self._lbl_status.setStyleSheet(
+            "color: #E67E22; font-weight: bold; font-size: 12px; padding: 5px;"
+        )
         self._lbl_status.setText("IA in esecuzione...")
         self._timer.start(self._tick_interval_ms)
 
     def _game_tick(self) -> None:
+        """Genera la runa del turno e avvia il worker per il calcolo asincrono della mossa."""
         self._turn_count += 1
 
         assert self._generator is not None
-        current_rune = self._generator.next_rune()
-        self._rune_widget.set_rune(current_rune)
+        self._current_rune = self._generator.next_rune()
+        self._rune_widget.set_rune(self._current_rune)
 
-        move = get_best_move(self._board, current_rune, self._forge.level)
+        # Indicatore visivo: la GUI rimane responsiva mentre il worker calcola
+        self._lbl_status.setStyleSheet(
+            "color: #3498DB; font-weight: bold; font-size: 12px; padding: 5px;"
+        )
+        self._lbl_status.setText("Agente sta pensando...")
+
+        self._worker = MoveWorker(self._board, self._current_rune, self._forge.level)
+        self._worker.move_ready.connect(self._on_move_ready)
+        self._worker.start()
+
+    def _on_move_ready(self, move: dict) -> None:
+        """Riceve la mossa dal worker, la applica e aggiorna tutta la GUI."""
+        assert self._current_rune is not None
+        current_rune = self._current_rune
         action = move["action"]
+
+        # Ripristina il colore normale del log mosse
+        self._lbl_status.setStyleSheet(
+            "color: #E67E22; font-weight: bold; font-size: 12px; padding: 5px;"
+        )
 
         if action == "place":
             r, c = move["row"], move["col"]
@@ -231,15 +288,20 @@ class MainWindow(QMainWindow):
         self._update_statistics_labels()
 
         if self._board.is_board_complete():
-            self._timer.stop()
-            self._lbl_status.setStyleSheet("color: #2ECC71; font-weight: bold; font-size: 13px;")
+            self._lbl_status.setStyleSheet(
+                "color: #2ECC71; font-weight: bold; font-size: 13px;"
+            )
             self._lbl_status.setText("🏆 VITTORIA! Board completata con successo!")
             self._finalize_game()
         elif self._forge.is_game_over:
-            self._timer.stop()
-            self._lbl_status.setStyleSheet("color: #E74C3C; font-weight: bold; font-size: 13px;")
+            self._lbl_status.setStyleSheet(
+                "color: #E74C3C; font-weight: bold; font-size: 13px;"
+            )
             self._lbl_status.setText("💥 GAME OVER! La forge è esplosa.")
             self._finalize_game()
+        else:
+            # Pausa visibile, poi turno successivo
+            self._timer.start(self._tick_interval_ms)
 
     def _update_statistics_labels(self) -> None:
         self._lbl_turns.setText(f"Turno Corrente: {self._turn_count}")
