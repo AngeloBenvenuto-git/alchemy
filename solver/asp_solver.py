@@ -8,9 +8,11 @@ Algoritmo di get_best_move:
   2. Per ognuna, Python esegue _N_SIMULATIONS simulazioni casuali complete:
      applica la mossa su una copia della board, poi usa _get_single_best per le
      mosse simulate e RuneGenerator con seed diverso per ogni simulazione.
-  3. Il punteggio di ogni candidata è la media dei risultati:
-     (celle_oro / 81) * 100 - 20 se game_over, senza penalità se board completa
-     o timeout.
+  3. Il punteggio finale di ogni candidata è:
+       score_mc * 0.7 + compatibility_score_normalizzato * 0.3
+     dove compatibility_score conta quante delle possibili rune future del livello
+     di difficoltà potrebbero essere piazzate in almeno una cella adiacente libera
+     alla posizione scelta (dopo il piazzamento).
   4. Ogni simulazione ha un timeout di _SIM_TIMEOUT_S secondi; se scatta, viene
      usato il risultato parziale (celle_oro accumulate fino a quel momento).
   5. Le simulazioni girano in parallelo su _MC_WORKERS thread per candidata.
@@ -18,6 +20,7 @@ Algoritmo di get_best_move:
 
 from __future__ import annotations
 import copy
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
@@ -27,7 +30,7 @@ import clingo
 from game.board import Board, GRID_SIZE
 from game.forge import Forge
 from game.generator import RuneGenerator
-from game.rune import Rune, RuneType
+from game.rune import Rune, RuneType, SYMBOLS_BY_DIFFICULTY, COLORS_BY_DIFFICULTY
 
 _LP_DIR = Path(__file__).parent
 
@@ -36,7 +39,7 @@ type Move = dict  # {"action": "place"|"use_skull"|"discard", "row"?: int, "col"
 
 _N_CANDIDATES         = 3      # mosse candidate estratte per il rollout MC
 _LOOKAHEAD_DIFFICULTY = "hard" # difficoltà usata per generare le rune nelle simulazioni
-_N_SIMULATIONS        = 5      # simulazioni MC per candidata
+_N_SIMULATIONS        = 15     # simulazioni MC per candidata
 _MC_DEPTH             = 15     # turni simulati per ogni rollout (profondità fissa)
 _SIM_TIMEOUT_S        = 2.0    # timeout di sicurezza per singola simulazione (secondi)
 _MC_WORKERS           = 8      # thread paralleli per le simulazioni
@@ -111,40 +114,59 @@ def _get_top_candidates(board: Board, rune: Rune, forge_level: int) -> list[Move
     Nota: --opt-mode=optN non funziona perché il vincolo P0 (R*9+C@0) rende ogni
     cella unica → Clingo trova sempre un solo modello al costo ottimale globale.
     L'esclusione iterativa contorna il problema e restituisce mosse davvero distinte.
+
+    Nella fase iniziale (rune_count < 8) con 1-2 piazzamenti validi, inietta il fatto
+    allow_early_discard affinché discard sia un candidato valutabile dal MC.
+    _get_single_best non inietta questo fatto, così le simulazioni MC restano
+    conservative (non sovra-scartano nelle fasi simulate).
     """
     candidates: list[Move] = []
     exclusions: list[str] = []
+
+    # Calcola una volta sola se abilitare lo scarto anticipato come candidato MC
+    extra_facts = ""
+    if (board.rune_count() < 8
+            and rune.rune_type == RuneType.NORMAL):
+        n_valid = len(board.get_valid_placements(rune))
+        if 0 < n_valid < 3:
+            extra_facts = "allow_early_discard."
 
     for _ in range(_N_CANDIDATES):
         ctl = clingo.Control(["--opt-mode=opt"])
         ctl.load(str(_LP_DIR / "alchemy.lp"))
         ctl.load(str(_LP_DIR / "strategy.lp"))
         ctl.add("base", [], _board_to_asp(board, rune, forge_level))
+        if extra_facts:
+            ctl.add("base", [], extra_facts)
         for exc in exclusions:
             ctl.add("base", [], exc)
         ctl.ground([("base", [])])
 
-        found: Move = {"action": "discard"}
+        found: Move | None = None
         with ctl.solve(yield_=True) as handle:
             for model in handle:
                 parsed = _parse_model(model)
                 if parsed is not None:
                     found = parsed
 
+        if found is None:
+            break  # UNSAT: tutte le alternative sono state escluse
+
         if found in candidates:
             break  # nessuna nuova alternativa disponibile
 
         candidates.append(found)
 
-        # Costruisce il vincolo che esclude questa mossa nel prossimo round
+        # Esclude questa mossa nel prossimo round
         if found["action"] == "place":
             exclusions.append(f":- place({found['row']},{found['col']}).")
         elif found["action"] == "use_skull":
             exclusions.append(f":- use_skull({found['row']},{found['col']}).")
         else:
-            # discard è l'unica azione residua quando non ci sono piazzamenti;
-            # non ha alternative significative su cui fare MC
-            break
+            # discard trovato: escludilo per cercare i piazzamenti alternativi.
+            # Se non esistono piazzamenti (forzato), il prossimo round sarà
+            # UNSAT e uscirà per il check found is None.
+            exclusions.append(":- discard.")
 
     return candidates or [{"action": "discard"}]
 
@@ -187,6 +209,39 @@ def _apply_move(board: Board, forge: Forge, rune: Rune, move: Move) -> None:
         forge.on_place()
     elif action == "discard":
         forge.on_discard()
+
+
+# ============================================================
+# Compatibility score
+# ============================================================
+
+def _compatibility_score(board: Board, row: int, col: int, difficulty: str) -> int:
+    """Conta quante rune normali del livello potrebbero essere piazzate in almeno
+    una cella adiacente libera a (row, col) — chiamata dopo il piazzamento,
+    quindi (row, col) è già occupata.
+
+    Itera tutte le combinazioni simbolo/colore del livello e verifica se ognuna
+    risulterebbe valida in almeno un vicino libero di (row, col).
+    """
+    free_neighbors: list[tuple[int, int]] = []
+    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        r, c = row + dr, col + dc
+        if 0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE:
+            if not board.is_gold(r, c) and not board.is_occupied(r, c):
+                free_neighbors.append((r, c))
+
+    if not free_neighbors:
+        return 0
+
+    symbols = SYMBOLS_BY_DIFFICULTY[difficulty]
+    colors  = COLORS_BY_DIFFICULTY[difficulty]
+    count = 0
+    for sym in symbols:
+        for clr in colors:
+            future_rune = Rune(symbol=sym, color=clr)
+            if any(board.can_place(future_rune, r, c) for r, c in free_neighbors):
+                count += 1
+    return count
 
 
 # ============================================================
@@ -259,10 +314,14 @@ def _mc_candidate_score(board: Board, candidate: Move, rune: Rune,
 # API pubblica
 # ============================================================
 
-def get_best_move(board: Board, current_rune: Rune, forge_level: int) -> Move:
+def get_best_move(board: Board, current_rune: Rune, forge_level: int,
+                  difficulty: str = "hard") -> Move:
     """Calcola la mossa ottimale tramite Monte Carlo rollout ibrido Python+ASP.
 
-    Firma invariata rispetto alla versione precedente.
+    Il punteggio finale di ogni candidata è:
+      score_mc * 0.7 + compatibility_score_normalizzato * 0.3
+    Il compatibility score misura quante rune future potrebbero essere piazzate
+    adiacenti alla posizione scelta dopo il piazzamento (solo per azioni place).
 
     Ritorna uno tra:
       {"action": "place",     "row": R, "col": C}
@@ -270,6 +329,19 @@ def get_best_move(board: Board, current_rune: Rune, forge_level: int) -> Move:
       {"action": "discard"}
     """
     candidates = _get_top_candidates(board, current_rune, forge_level)
+
+    # --- DEBUG TEMPORANEO: attivo solo quando ci sono ≤3 rune sulla board ---
+    if board.rune_count() <= 3:
+        valid_py = board.get_valid_placements(current_rune)
+        asp_facts = _board_to_asp(board, current_rune, forge_level)
+        print("\n" + "="*60, file=sys.stderr)
+        print(f"[DEBUG] rune_count={board.rune_count()}  forge={forge_level}", file=sys.stderr)
+        print(f"[DEBUG] current_rune: {current_rune!r}", file=sys.stderr)
+        print(f"[DEBUG] valid_placements (Python): {valid_py}", file=sys.stderr)
+        print(f"[DEBUG] ASP facts:\n{asp_facts}", file=sys.stderr)
+        print(f"[DEBUG] candidates (ASP): {candidates}", file=sys.stderr)
+        print("="*60 + "\n", file=sys.stderr)
+    # --- FINE DEBUG ---
 
     # Fast path: unica candidata, il rollout non cambierebbe nulla
     if len(candidates) == 1:
@@ -280,12 +352,30 @@ def get_best_move(board: Board, current_rune: Rune, forge_level: int) -> Move:
     if board.rune_count() < 5:
         return candidates[0]
 
+    n_syms = len(SYMBOLS_BY_DIFFICULTY[difficulty])
+    n_clrs = len(COLORS_BY_DIFFICULTY[difficulty])
+    max_possible_runes = n_syms * n_clrs
+
     best_move  = candidates[0]
     best_score = float("-inf")
     for candidate in candidates:
-        score = _mc_candidate_score(board, candidate, current_rune, forge_level)
-        if score > best_score:
-            best_score = score
+        score_mc = _mc_candidate_score(board, candidate, current_rune, forge_level)
+
+        if candidate["action"] == "place":
+            temp_board = copy.deepcopy(board)
+            temp_forge = Forge()
+            for _ in range(forge_level):
+                temp_forge.on_discard()
+            _apply_move(temp_board, temp_forge, current_rune, candidate)
+            compat_norm = _compatibility_score(
+                temp_board, candidate["row"], candidate["col"], difficulty
+            ) / max_possible_runes
+        else:
+            compat_norm = 0.0
+
+        score_finale = score_mc * 0.7 + compat_norm * 0.3
+        if score_finale > best_score:
+            best_score = score_finale
             best_move  = candidate
 
     return best_move

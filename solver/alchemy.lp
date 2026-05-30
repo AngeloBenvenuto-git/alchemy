@@ -36,6 +36,9 @@ empty(R,C) :- row(R), col(C), not occupied(R,C), not gold(R,C).
 % La board è vuota se non ci sono rune (prima mossa: placement libero)
 board_empty :- #count{ R,C : occupied(R,C) } = 0.
 
+% Numero di rune attualmente sulla board
+rune_count(N) :- N = #count{ R,C : occupied(R,C) }.
+
 % --- Compatibilità della runa corrente con i vicini già piazzati ---
 
 % La runa corrente è wildcard: compatibile con qualsiasi vicino
@@ -78,6 +81,8 @@ valid_placement(R,C) :-
 valid_removal(R,C) :- occupied(R,C), current_type(skull).
 
 % --- Statistiche righe e colonne (usate dalla strategia) ---
+gold_count(N) :- N = #count{ R,C : gold(R,C) }.
+
 row_fill(R,N) :- row(R), N = #count{ C : occupied(R,C) }.
 col_fill(C,N) :- col(C), N = #count{ R : occupied(R,C) }.
 

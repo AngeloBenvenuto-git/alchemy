@@ -21,14 +21,15 @@ class MoveWorker(QThread):
     """
     move_ready: pyqtSignal = pyqtSignal(dict)
 
-    def __init__(self, board: Board, rune: Rune, forge_level: int) -> None:
+    def __init__(self, board: Board, rune: Rune, forge_level: int, difficulty: str) -> None:
         super().__init__()
         self._board = board
         self._rune = rune
         self._forge_level = forge_level
+        self._difficulty = difficulty
 
     def run(self) -> None:
-        move = get_best_move(self._board, self._rune, self._forge_level)
+        move = get_best_move(self._board, self._rune, self._forge_level, self._difficulty)
         self.move_ready.emit(move)
 
 
@@ -247,7 +248,10 @@ class MainWindow(QMainWindow):
         )
         self._lbl_status.setText("Agente sta pensando...")
 
-        self._worker = MoveWorker(self._board, self._current_rune, self._forge.level)
+        self._worker = MoveWorker(
+            self._board, self._current_rune, self._forge.level,
+            self._combo_diff.currentText()
+        )
         self._worker.move_ready.connect(self._on_move_ready)
         self._worker.start()
 

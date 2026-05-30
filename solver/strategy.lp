@@ -18,11 +18,38 @@
 % Per skull: rimuovi una runa oppure scarta
 1 { use_skull(R,C) : valid_removal(R,C) ; discard } 1 :- current_type(skull).
 
-% --- Vincoli duri: non scartare quando esiste un'azione valida ---
-% Scartare aumenta la forge di 1; qualsiasi azione la diminuisce di 1.
-% Non c'è mai motivo di scartare quando si può piazzare o usare uno skull.
-:- discard, valid_placement(_,_), not current_type(skull).
+% --- Gestione del discard: contestuale nella fase iniziale ---
+%
+% Nei primissimi turni (rune_count < 8) con solo 1-2 piazzamenti validi,
+% il solver può scartare per "aspettare" una runa più compatibile invece di
+% costruire un cluster difficile da espandere.
+%
+% allow_early_discard è un fatto opzionale iniettato da Python solo in
+% _get_top_candidates (selezione candidati). _get_single_best non lo inietta,
+% così le simulazioni MC interne restano conservative e non sovra-scartano.
+
+#defined allow_early_discard/0.
+
+% Numero di piazzamenti validi disponibili questo turno
+valid_count(N) :- N = #count{ R,C : valid_placement(R,C) }.
+
+% Fase iniziale: meno di 8 rune sulla board E nessuna riga/colonna ancora completata.
+% Se gold_count >= 9 il board ha già avuto almeno un completamento: il rune_count
+% basso è dovuto alla pulizia della riga/colonna, non a una board davvero vuota.
+early_game :- rune_count(N), N < 8, gold_count(G), G < 9.
+
+% HARD — Skull: non scartare mai se si può rimuovere una runa
 :- discard, valid_removal(_,_), current_type(skull).
+
+% HARD — Fase avanzata (≥8 rune): comportamento originale
+:- discard, valid_placement(_,_), not current_type(skull), not early_game.
+
+% HARD — Fase iniziale con ≥3 piazzamenti: abbondanza di scelte, vietato scartare
+:- discard, valid_placement(_,_), not current_type(skull), early_game, valid_count(N), N >= 3.
+
+% HARD — Fase iniziale con 1-2 piazzamenti, senza allow_early_discard (simulazioni MC):
+%         le simulazioni restano conservative per stimare correttamente il rischio forge
+:- discard, valid_placement(_,_), not current_type(skull), early_game, valid_count(N), N < 3, not allow_early_discard.
 
 % ============================================================
 % Calcolo del cluster principale (connettività della board)
